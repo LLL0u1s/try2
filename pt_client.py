@@ -9,6 +9,8 @@ import argparse
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import RobustScaler
+from opacus import PrivacyEngine  # 新增
+from opacus.validators import ModuleValidator  # 新增
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -159,11 +161,25 @@ class FlowerClient(fl.client.NumPyClient):
         self.val_loader = val_loader
         self.device = device
         self.criterion = nn.BCELoss()
+
+        self.privacy_engine = PrivacyEngine()
+
+        self.model = ModuleValidator.fix(self.model)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
+
+        self.model, self.optimizer, self.train_loader = self.privacy_engine.make_private_with_epsilon(
+            module=self.model,
+            optimizer=self.optimizer,
+            data_loader=self.train_loader,
+            target_epsilon=5.0,
+            target_delta=1e-5,
+            epochs=1,
+            max_grad_norm=1.0
+        )
+        print(f"差分隐私已启用，目标 ε = 5.0，δ = 1e-5")
 
     def get_parameters(self):
         return [val.cpu().detach().numpy() for val in self.model.parameters()]
-
 
     def set_parameters(self, parameters):
         params = [torch.tensor(p).to(self.device) for p in parameters]
@@ -181,7 +197,12 @@ class FlowerClient(fl.client.NumPyClient):
                 loss = self.criterion(preds, y)
                 loss.backward()
                 self.optimizer.step()
-        return self.get_parameters(), len(self.train_loader.dataset), {}
+
+        # -------- 修复点 --------
+        epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
+        print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
+
+        return self.get_parameters(), len(self.train_loader.dataset), {"epsilon": epsilon}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
@@ -209,10 +230,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 数据准备（只需运行一次，文件已存在可跳过）
     prepare_and_save_data()
 
-    # 加载数据
     train_loader = load_data(args.client_name)
     val_loader = load_val_data()
 

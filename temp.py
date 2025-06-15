@@ -1,6 +1,6 @@
 
 
-以下是一个联邦学习模型分为pt_server.py和pt_client.py，请使用Opacus增加差分隐私功能和使用 TenSEAL 进行同态加密功能
+以下是一个联邦学习模型分为pt_server.py和pt_client.py ，请增加差分隐私保护功能
 pt_server.py
 import flwr as fl
 import torch
@@ -158,6 +158,8 @@ if __name__ == "__main__":
         config=fl.server.ServerConfig(num_rounds=50),  # 这个最大轮数是防止服务端强制停止
         strategy=strategy,
     )
+
+
 pt_client.py
 import flwr as fl
 import torch
