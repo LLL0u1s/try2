@@ -9,8 +9,9 @@ import argparse
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import RobustScaler
-from opacus import PrivacyEngine  # 新增
-from opacus.validators import ModuleValidator  # 新增
+from opacus import PrivacyEngine
+from opacus.validators import ModuleValidator
+import joblib
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -129,6 +130,16 @@ def prepare_and_save_data():
     np.savez("data_bob.npz", x=bob_x, y=bob_y)
 
     print("数据准备完成！")
+ 
+
+    # 准备数据后
+    joblib.dump(scaler, "scaler.pkl")
+    joblib.dump(pca, "pca.pkl")
+
+    # 保存经过one-hot编码后所有列名（去掉label列）
+    all_features_columns = list(data_train.drop(['outcome', 'level'], axis=1).columns)
+    np.save("all_features_columns.npy", all_features_columns)
+
 
 # -------- 加载数据 --------
 def load_data(client_name):
@@ -155,11 +166,12 @@ def load_val_data():
 
 # -------- Flower 客户端 --------
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, model, train_loader, val_loader, device):
+    def __init__(self, model, train_loader, val_loader, device, client_name):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.client_name = client_name
         self.criterion = nn.BCELoss()
 
         self.privacy_engine = PrivacyEngine()
@@ -198,9 +210,13 @@ class FlowerClient(fl.client.NumPyClient):
                 loss.backward()
                 self.optimizer.step()
 
-        # -------- 修复点 --------
         epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
         print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
+
+        # 保存模型权重，文件名带客户端名防止冲突
+        save_path = f"client_model_{self.client_name}.pth"
+        torch.save(self.model.state_dict(), save_path)
+        print(f"模型权重已保存到 {save_path}")
 
         return self.get_parameters(), len(self.train_loader.dataset), {"epsilon": epsilon}
 
@@ -237,7 +253,7 @@ def main():
 
     model = PTModel(input_dim=20)
 
-    client = FlowerClient(model, train_loader, val_loader, device)
+    client = FlowerClient(model, train_loader, val_loader, device, args.client_name)
     fl.client.start_numpy_client(server_address=args.server_address, client=client)
 
 if __name__ == "__main__":

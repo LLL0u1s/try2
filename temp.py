@@ -1,12 +1,31 @@
 
 
-以下是一个联邦学习模型分为pt_server.py和pt_client.py ，请增加差分隐私保护功能
-pt_server.py
+以下是一个联邦学习模型分为pt_server.py和pt_client.py ，请增加同态加密功能
 import flwr as fl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import logging
+import os
+from datetime import datetime
+
+# ---------------- 日志初始化函数 ----------------
+def init_logger():
+    log_dir = "server_logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_path = os.path.join(log_dir, f"{log_filename}.txt")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_path),
+            logging.StreamHandler()
+        ]
+    )
+    logging.info("日志系统初始化完成")
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -103,42 +122,71 @@ def get_evaluate_fn():
 
     return evaluate
 
-# ---------------- 自定义FedAvg策略，控制训练是否继续 ----------------
+# ---------------- 自定义FedAvg策略，支持日志和提前停止 ----------------
 class MyFedAvgStrategy(fl.server.strategy.FedAvg):
-    def __init__(self, max_rounds=3, threshold_acc=0.90, **kwargs):
+    def __init__(self, num_rounds=10, threshold_acc=0.90, **kwargs):
         super().__init__(**kwargs)
-        self.max_rounds = max_rounds  # 最大训练轮数
-        self.threshold_acc = threshold_acc  # 准确率阈值
+        self.num_rounds = num_rounds
+        self.threshold_acc = threshold_acc
         self.stop_training = False
 
-    def configure_next_round(
-        self,
-        rnd: int,
-        results,
-        failures,
-    ):
-        if failures:
-            print(f"第{rnd}轮有失败客户端，继续训练")
-            self.stop_training = False
-        else:
-            accuracies = []
-            for _, metrics in results:
-                if metrics and "accuracy" in metrics:
-                    accuracies.append(metrics["accuracy"])
-            if accuracies:
-                avg_acc = sum(accuracies) / len(accuracies)
-                print(f"第{rnd}轮平均准确率: {avg_acc:.4f}")
-                if avg_acc >= self.threshold_acc:
-                    print(f"准确率达到{avg_acc:.4f}，停止训练")
-                    self.stop_training = True
+    def aggregate_fit(self, server_round, results, failures):
+        """直接使用父类实现，不要自己处理 metrics"""
+        return super().aggregate_fit(server_round, results, failures)
 
-        if self.stop_training or rnd >= self.max_rounds:
-            return None, {}  # None表示停止训练
-        else:
-            return super().configure_next_round(rnd, results, failures)
+    def aggregate_evaluate(self,server_round: int,results,failures):
+        """聚合评估结果并检查是否达到目标准确率"""
+        if not results:
+            return 0.0, {}
+
+        # 计算平均准确率
+        accuracies = [r[1].metrics["accuracy"] for r in results]
+        accuracy_aggregated = sum(accuracies) / len(accuracies)
+        
+        logging.info(f"第 {server_round} 轮平均准确率: {accuracy_aggregated:.4f}")
+        
+        # # 如果达到目标准确率，返回None触发停止
+        # if accuracy_aggregated >= self.threshold_acc:
+        #     logging.info(f"准确率达到目标 {self.threshold_acc}，停止训练")
+        #     self.stop_training = 1
+        #     return 0.0, {}
+        
+        # 否则返回聚合结果
+        loss_aggregated = sum(r[1].loss for r in results) / len(results)
+        return loss_aggregated, {"accuracy": accuracy_aggregated}
+
+    def evaluate(
+        self,
+        server_round: int,
+        parameters: fl.common.Parameters,
+    ):
+        """评估当前模型"""
+        # if self.stop_training:
+        #     logging.info(f"训练提前停止，当前轮次: {server_round}")
+        #     return None
+
+        results = super().evaluate(server_round, parameters)
+        if results is None:
+            logging.info("results is None")
+            return None  
+        loss, metrics = results
+        return loss, metrics
+
+    def configure_fit(self, server_round, parameters, client_manager):
+        logging.info(f"配置第 {server_round} 轮训练客户端")
+        return super().configure_fit(server_round, parameters, client_manager)
+
+    def configure_evaluate(self, server_round, parameters, client_manager):
+        logging.info(f"配置第 {server_round} 轮评估客户端")
+        return super().configure_evaluate(server_round, parameters, client_manager)
+
 
 # ---------------- 启动服务器 ----------------
 if __name__ == "__main__":
+    init_logger()
+
+    logging.info("联邦学习服务器启动")
+
     strategy = MyFedAvgStrategy(
         fraction_fit=1.0,
         fraction_evaluate=1.0,
@@ -149,15 +197,17 @@ if __name__ == "__main__":
         evaluate_fn=get_evaluate_fn(),
         on_fit_config_fn=fit_config,
         on_evaluate_config_fn=evaluate_config,
-        max_rounds=3,
-        threshold_acc=0.97,
+        num_rounds=50,
+        threshold_acc=0.80,
     )
 
     fl.server.start_server(
         server_address="0.0.0.0:8080",
-        config=fl.server.ServerConfig(num_rounds=50),  # 这个最大轮数是防止服务端强制停止
+        config=fl.server.ServerConfig(num_rounds=50),
         strategy=strategy,
     )
+
+    logging.info("联邦学习服务器已关闭")
 
 
 pt_client.py
@@ -172,6 +222,8 @@ import argparse
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import RobustScaler
+from opacus import PrivacyEngine  # 新增
+from opacus.validators import ModuleValidator  # 新增
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -322,11 +374,25 @@ class FlowerClient(fl.client.NumPyClient):
         self.val_loader = val_loader
         self.device = device
         self.criterion = nn.BCELoss()
+
+        self.privacy_engine = PrivacyEngine()
+
+        self.model = ModuleValidator.fix(self.model)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
+
+        self.model, self.optimizer, self.train_loader = self.privacy_engine.make_private_with_epsilon(
+            module=self.model,
+            optimizer=self.optimizer,
+            data_loader=self.train_loader,
+            target_epsilon=5.0,
+            target_delta=1e-5,
+            epochs=1,
+            max_grad_norm=1.0
+        )
+        print(f"差分隐私已启用，目标 ε = 5.0，δ = 1e-5")
 
     def get_parameters(self):
         return [val.cpu().detach().numpy() for val in self.model.parameters()]
-
 
     def set_parameters(self, parameters):
         params = [torch.tensor(p).to(self.device) for p in parameters]
@@ -344,7 +410,12 @@ class FlowerClient(fl.client.NumPyClient):
                 loss = self.criterion(preds, y)
                 loss.backward()
                 self.optimizer.step()
-        return self.get_parameters(), len(self.train_loader.dataset), {}
+
+        # -------- 修复点 --------
+        epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
+        print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
+
+        return self.get_parameters(), len(self.train_loader.dataset), {"epsilon": epsilon}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
@@ -372,10 +443,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 数据准备（只需运行一次，文件已存在可跳过）
     prepare_and_save_data()
 
-    # 加载数据
     train_loader = load_data(args.client_name)
     val_loader = load_val_data()
 
