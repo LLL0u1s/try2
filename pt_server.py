@@ -26,15 +26,13 @@ class EncryptedFedAvg(fl.server.strategy.FedAvg):
     def aggregate_fit(self, server_round, results, failures):
         if not results:
             return None, {}
-        # 取第一个客户端的 context 公钥
-        pub_context_b64 = results[0][1].parameters.tensors[3]
+        pub_context_b64 = results[0][1].parameters.tensors[5]
         if isinstance(pub_context_b64, bytes):
             pub_context_b64 = pub_context_b64.decode("utf-8")
         pub_context_bytes = base64.b64decode(pub_context_b64)
         context = ts.context_from(pub_context_bytes)
         context.global_scale = 2 ** 60
 
-        # 明文参数聚合
         num_clients = len(results)
         params_list = []
         shapes = None
@@ -47,32 +45,40 @@ class EncryptedFedAvg(fl.server.strategy.FedAvg):
             agg = sum(p[idx] for p in params_list) / num_clients
             agg_params.append(agg)
 
-        # 加密均值聚合
-        enc_means_list = []
-        for _, fitres in results:
-            enc_means = pickle.loads(fitres.parameters.tensors[2])
-            enc_means_list.append(enc_means)
-        agg_enc_means = []
-        for idx in range(len(enc_means_list[0])):
-            enc_vecs = []
-            for enc_means in enc_means_list:
-                enc_bytes = base64.b64decode(enc_means[idx].encode("utf-8"))
-                enc_vec = ts.ckks_vector_from(context, enc_bytes)
-                enc_vecs.append(enc_vec)
-            agg_vec = enc_vecs[0]
-            for v in enc_vecs[1:]:
-                agg_vec += v
-            agg_vec = agg_vec * (1.0 / num_clients)
-            agg_bytes = agg_vec.serialize()
-            agg_b64 = base64.b64encode(agg_bytes).decode("utf-8")
-            agg_enc_means.append(agg_b64)
+        # 聚合加密均值、方差、梯度
+        def agg_enc(enc_tensor_idx):
+            enc_list = []
+            for _, fitres in results:
+                encs = pickle.loads(fitres.parameters.tensors[enc_tensor_idx])
+                enc_list.append(encs)
+            agg_encs = []
+            for idx in range(len(enc_list[0])):
+                enc_vecs = []
+                for encs in enc_list:
+                    enc_bytes = base64.b64decode(encs[idx].encode("utf-8"))
+                    enc_vec = ts.ckks_vector_from(context, enc_bytes)
+                    enc_vecs.append(enc_vec)
+                agg_vec = enc_vecs[0]
+                for v in enc_vecs[1:]:
+                    agg_vec += v
+                agg_vec = agg_vec * (1.0 / num_clients)
+                agg_bytes = agg_vec.serialize()
+                agg_b64 = base64.b64encode(agg_bytes).decode("utf-8")
+                agg_encs.append(agg_b64)
+            return agg_encs
+
+        agg_enc_means = agg_enc(2)
+        agg_enc_vars = agg_enc(3)
+        agg_enc_grads = agg_enc(4)
 
         agg_parameters = fl.common.Parameters(
             tensors=[
                 pickle.dumps(agg_params),
                 pickle.dumps(shapes),
                 pickle.dumps(agg_enc_means),
-                results[0][1].parameters.tensors[3]
+                pickle.dumps(agg_enc_vars),
+                pickle.dumps(agg_enc_grads),
+                results[0][1].parameters.tensors[5]
             ],
             tensor_type="mixed"
         )

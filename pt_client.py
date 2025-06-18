@@ -170,20 +170,29 @@ class FlowerClient(fl.client.Client):
         # 明文参数
         params = [val.cpu().detach().numpy() for val in self.model.parameters()]
         self.param_shapes = [p.shape for p in params]
-        # 只加密每层参数的均值
+        # 均值、方差
         means = [np.mean(p) for p in params]
-        enc_means = []
-        for m in means:
-            enc = ts.ckks_vector(self.context, [m])
-            enc_bytes = enc.serialize()
-            enc_b64 = base64.b64encode(enc_bytes).decode("utf-8")
-            enc_means.append(enc_b64)
+        vars_ = [np.var(p) for p in params]
+        # 梯度
+        grads = []
+        for p in self.model.parameters():
+            if p.grad is not None:
+                grads.append(np.mean(p.grad.cpu().numpy()))
+            else:
+                grads.append(0.0)
+        # 加密
+        enc_means, enc_vars, enc_grads = [], [], []
+        for m, v, g in zip(means, vars_, grads):
+            enc_means.append(base64.b64encode(ts.ckks_vector(self.context, [m]).serialize()).decode("utf-8"))
+            enc_vars.append(base64.b64encode(ts.ckks_vector(self.context, [v]).serialize()).decode("utf-8"))
+            enc_grads.append(base64.b64encode(ts.ckks_vector(self.context, [g]).serialize()).decode("utf-8"))
         pub_context = base64.b64encode(self.context.serialize(save_secret_key=False)).decode("utf-8")
-        # 返回明文参数和加密均值
         return fl.common.Parameters(tensors=[
             pickle.dumps(params),
             pickle.dumps(self.param_shapes),
             pickle.dumps(enc_means),
+            pickle.dumps(enc_vars),
+            pickle.dumps(enc_grads),
             pub_context.encode("utf-8")
         ], tensor_type="mixed")
 
@@ -197,11 +206,15 @@ class FlowerClient(fl.client.Client):
         # 可选：解密均值用于本地分析
         if len(parameters.tensors) > 2 and parameters.tensors[2]:
             enc_means = pickle.loads(parameters.tensors[2])
-            for i, enc_b64 in enumerate(enc_means):
+            enc_vars = pickle.loads(parameters.tensors[3])
+            enc_grads = pickle.loads(parameters.tensors[4])
+            for i, (enc_b64, var_b64, grad_b64) in enumerate(zip(enc_means, enc_vars, enc_grads)):
                 enc_bytes = base64.b64decode(enc_b64.encode("utf-8"))
                 enc_vec = ts.ckks_vector_from(self.context, enc_bytes)
                 mean_val = enc_vec.decrypt()[0]
-                print(f"Layer {i} aggregated mean (decrypted): {mean_val}")
+                var_val = ts.ckks_vector_from(self.context, base64.b64decode(var_b64.encode("utf-8"))).decrypt()[0]
+                grad_val = ts.ckks_vector_from(self.context, base64.b64decode(grad_b64.encode("utf-8"))).decrypt()[0]
+                print(f"Layer {i} aggregated mean: {mean_val}, var: {var_val}, grad: {grad_val}")
 
     def fit(self, ins):
         self.set_parameters(ins.parameters)
