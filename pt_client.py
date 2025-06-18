@@ -12,6 +12,9 @@ from sklearn.preprocessing import RobustScaler
 from opacus import PrivacyEngine
 from opacus.validators import ModuleValidator
 import joblib
+import tenseal as ts
+import base64
+import pickle
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -27,7 +30,6 @@ class SelfAttention(nn.Module):
         Q = self.Wq(x)
         K = self.Wk(x)
         V = self.Wv(x)
-
         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
         weights = F.softmax(scores, dim=-1)
         output = torch.matmul(weights, V)
@@ -39,37 +41,27 @@ class PTModel(nn.Module):
         super(PTModel, self).__init__()
         self.fc1 = nn.Linear(input_dim, 64)
         self.dropout1 = nn.Dropout(0.4)
-
         self.fc2 = nn.Linear(64, 128)
         self.dropout2 = nn.Dropout(0.4)
-
         self.self_attention = SelfAttention(128)
-
         self.fc3 = nn.Linear(128, 512)
         self.dropout3 = nn.Dropout(0.4)
-
         self.fc4 = nn.Linear(512, 128)
         self.dropout4 = nn.Dropout(0.4)
-
         self.fc5 = nn.Linear(128, 1)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = self.dropout1(x)
-
         x = F.relu(self.fc2(x))
         x = self.dropout2(x)
-
         x = x.unsqueeze(1)
         x = self.self_attention(x)
         x = x.squeeze(1)
-
         x = F.relu(self.fc3(x))
         x = self.dropout3(x)
-
         x = F.relu(self.fc4(x))
         x = self.dropout4(x)
-
         x = torch.sigmoid(self.fc5(x))
         return x
 
@@ -77,7 +69,6 @@ class PTModel(nn.Module):
 def prepare_and_save_data():
     print("读取原始数据...")
     data_train = pd.read_csv("KDDTrain+.txt")
-
     columns = (['duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land', 'wrong_fragment',
                 'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
                 'num_root', 'num_file_creations', 'num_shells', 'num_access_files', 'num_outbound_cmds',
@@ -88,58 +79,40 @@ def prepare_and_save_data():
                 'dst_host_serror_rate', 'dst_host_srv_serror_rate', 'dst_host_rerror_rate',
                 'dst_host_srv_rerror_rate', 'outcome', 'level'])
     data_train.columns = columns
-
     data_train.loc[data_train['outcome'] == "normal", "outcome"] = 0
     data_train.loc[data_train['outcome'] != 0, "outcome"] = 1
     data_train['outcome'] = data_train['outcome'].astype(int)
-
     cat_cols = ['is_host_login', 'protocol_type', 'service', 'flag', 'land', 'logged_in', 'is_guest_login', 'level', 'outcome']
-
     df_num = data_train.drop(cat_cols, axis=1)
     num_cols = df_num.columns
-
     print("归一化数值特征...")
     scaler = RobustScaler()
     scaled_df = scaler.fit_transform(df_num)
     scaled_df = pd.DataFrame(scaled_df, columns=num_cols)
-
     data_train.drop(labels=num_cols, axis=1, inplace=True)
     data_train[num_cols] = scaled_df[num_cols]
-
     print("One-hot编码类别特征...")
     data_train = pd.get_dummies(data_train, columns=['protocol_type', 'service', 'flag'])
-
     print("准备X、y矩阵...")
     X = data_train.drop(['outcome', 'level'], axis=1).values
     y = data_train['outcome'].values
-
     print("PCA降维到20维...")
     pca = PCA(n_components=20)
     X_reduced = pca.fit_transform(X)
-
     val_split = int(0.2 * X_reduced.shape[0])
     train_split = (X_reduced.shape[0] - val_split) // 2
-
     val_x, val_y = X_reduced[:val_split], y[:val_split]
     alice_x, alice_y = X_reduced[val_split:val_split + train_split], y[val_split:val_split + train_split]
     bob_x, bob_y = X_reduced[val_split + train_split:], y[val_split + train_split:]
-
     print("保存数据为 numpy 文件...")
     np.savez("data_val.npz", x=val_x, y=val_y)
     np.savez("data_alice.npz", x=alice_x, y=alice_y)
     np.savez("data_bob.npz", x=bob_x, y=bob_y)
-
     print("数据准备完成！")
- 
-
-    # 准备数据后
     joblib.dump(scaler, "scaler.pkl")
     joblib.dump(pca, "pca.pkl")
-
-    # 保存经过one-hot编码后所有列名（去掉label列）
     all_features_columns = list(data_train.drop(['outcome', 'level'], axis=1).columns)
     np.save("all_features_columns.npy", all_features_columns)
-
 
 # -------- 加载数据 --------
 def load_data(client_name):
@@ -149,10 +122,8 @@ def load_data(client_name):
         data = np.load("data_bob.npz")
     else:
         raise ValueError("客户端名称必须为 'alice' 或 'bob'")
-
     x = torch.tensor(data["x"], dtype=torch.float32)
     y = torch.tensor(data["y"], dtype=torch.float32).view(-1, 1)
-
     dataset = TensorDataset(x, y)
     return DataLoader(dataset, batch_size=32, shuffle=True)
 
@@ -160,12 +131,11 @@ def load_val_data():
     data = np.load("data_val.npz")
     x = torch.tensor(data["x"], dtype=torch.float32)
     y = torch.tensor(data["y"], dtype=torch.float32).view(-1, 1)
-
     dataset = TensorDataset(x, y)
     return DataLoader(dataset, batch_size=32, shuffle=False)
 
 # -------- Flower 客户端 --------
-class FlowerClient(fl.client.NumPyClient):
+class FlowerClient(fl.client.Client):
     def __init__(self, model, train_loader, val_loader, device, client_name):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -173,12 +143,9 @@ class FlowerClient(fl.client.NumPyClient):
         self.device = device
         self.client_name = client_name
         self.criterion = nn.BCELoss()
-
         self.privacy_engine = PrivacyEngine()
-
         self.model = ModuleValidator.fix(self.model)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
-
         self.model, self.optimizer, self.train_loader = self.privacy_engine.make_private_with_epsilon(
             module=self.model,
             optimizer=self.optimizer,
@@ -189,39 +156,79 @@ class FlowerClient(fl.client.NumPyClient):
             max_grad_norm=1.0
         )
         print(f"差分隐私已启用，目标 ε = 5.0，δ = 1e-5")
+        # 初始化同态加密上下文
+        self.context = ts.context(
+            ts.SCHEME_TYPE.CKKS,
+            poly_modulus_degree=8192,
+            coeff_mod_bit_sizes=[60, 40, 40, 60]
+        )
+        self.context.generate_galois_keys()
+        self.context.global_scale = 2 ** 60
+        self.param_shapes = None
 
-    def get_parameters(self):
-        return [val.cpu().detach().numpy() for val in self.model.parameters()]
+    def get_parameters(self, ins):
+        # 明文参数
+        params = [val.cpu().detach().numpy() for val in self.model.parameters()]
+        self.param_shapes = [p.shape for p in params]
+        # 只加密每层参数的均值
+        means = [np.mean(p) for p in params]
+        enc_means = []
+        for m in means:
+            enc = ts.ckks_vector(self.context, [m])
+            enc_bytes = enc.serialize()
+            enc_b64 = base64.b64encode(enc_bytes).decode("utf-8")
+            enc_means.append(enc_b64)
+        pub_context = base64.b64encode(self.context.serialize(save_secret_key=False)).decode("utf-8")
+        # 返回明文参数和加密均值
+        return fl.common.Parameters(tensors=[
+            pickle.dumps(params),
+            pickle.dumps(self.param_shapes),
+            pickle.dumps(enc_means),
+            pub_context.encode("utf-8")
+        ], tensor_type="mixed")
 
     def set_parameters(self, parameters):
-        params = [torch.tensor(p).to(self.device) for p in parameters]
+        # 只用明文参数
+        params = pickle.loads(parameters.tensors[0])
+        shapes = pickle.loads(parameters.tensors[1])
+        params = [torch.tensor(p, dtype=torch.float32).reshape(shape).to(self.device) for p, shape in zip(params, shapes)]
         for p, new_p in zip(self.model.parameters(), params):
             p.data = new_p.data.clone()
+        # 可选：解密均值用于本地分析
+        if len(parameters.tensors) > 2 and parameters.tensors[2]:
+            enc_means = pickle.loads(parameters.tensors[2])
+            for i, enc_b64 in enumerate(enc_means):
+                enc_bytes = base64.b64decode(enc_b64.encode("utf-8"))
+                enc_vec = ts.ckks_vector_from(self.context, enc_bytes)
+                mean_val = enc_vec.decrypt()[0]
+                print(f"Layer {i} aggregated mean (decrypted): {mean_val}")
 
-    def fit(self, parameters, config):
-        self.set_parameters(parameters)
+    def fit(self, ins):
+        self.set_parameters(ins.parameters)
         self.model.train()
         for epoch in range(1):
             for x, y in self.train_loader:
                 x, y = x.to(self.device), y.to(self.device)
                 self.optimizer.zero_grad()
                 preds = self.model(x)
+                preds = torch.clamp(preds, min=0.0, max=1.0)  # 保证在[0,1]
                 loss = self.criterion(preds, y)
                 loss.backward()
                 self.optimizer.step()
-
         epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
         print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
-
-        # 保存模型权重，文件名带客户端名防止冲突
         save_path = f"client_model_{self.client_name}.pth"
         torch.save(self.model.state_dict(), save_path)
         print(f"模型权重已保存到 {save_path}")
+        return fl.common.FitRes(
+            parameters=self.get_parameters(ins),
+            num_examples=len(self.train_loader.dataset),
+            metrics={"epsilon": epsilon},
+            status=fl.common.Status(code=fl.common.Code.OK, message="Success")
+        )
 
-        return self.get_parameters(), len(self.train_loader.dataset), {"epsilon": epsilon}
-
-    def evaluate(self, parameters, config):
-        self.set_parameters(parameters)
+    def evaluate(self, ins):
+        self.set_parameters(ins.parameters)
         self.model.eval()
         loss_total = 0.0
         correct = 0
@@ -230,31 +237,31 @@ class FlowerClient(fl.client.NumPyClient):
             for x, y in self.val_loader:
                 x, y = x.to(self.device), y.to(self.device)
                 preds = self.model(x)
+                preds = torch.clamp(preds, min=0.0, max=1.0)  # 保证在[0,1]
                 loss = self.criterion(preds, y)
                 loss_total += loss.item() * y.size(0)
                 predicted = (preds > 0.5).float()
                 correct += (predicted == y).sum().item()
                 total += y.size(0)
-        return loss_total / total, total, {"accuracy": correct / total}
+        return fl.common.EvaluateRes(
+            loss=loss_total / total,
+            num_examples=total,
+            metrics={"accuracy": correct / total},
+            status=fl.common.Status(code=fl.common.Code.OK, message="Success")
+        )
 
-# -------- 主程序 --------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--client_name", type=str, required=True, help="alice or bob")
     parser.add_argument("--server_address", type=str, default="localhost:8080", help="Flower server address")
     args = parser.parse_args()
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     prepare_and_save_data()
-
     train_loader = load_data(args.client_name)
     val_loader = load_val_data()
-
     model = PTModel(input_dim=20)
-
     client = FlowerClient(model, train_loader, val_loader, device, args.client_name)
-    fl.client.start_numpy_client(server_address=args.server_address, client=client)
+    fl.client.start_client(server_address=args.server_address, client=client)
 
 if __name__ == "__main__":
     main()
