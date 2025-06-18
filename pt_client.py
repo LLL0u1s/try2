@@ -68,7 +68,7 @@ class PTModel(nn.Module):
 # -------- 数据准备函数 --------
 def prepare_and_save_data():
     print("读取原始数据...")
-    data_train = pd.read_csv("KDDTrain+.txt")
+    data_train = pd.read_csv("datasets/KDDTrain+.txt")
     columns = (['duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land', 'wrong_fragment',
                 'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
                 'num_root', 'num_file_creations', 'num_shells', 'num_access_files', 'num_outbound_cmds',
@@ -105,21 +105,21 @@ def prepare_and_save_data():
     alice_x, alice_y = X_reduced[val_split:val_split + train_split], y[val_split:val_split + train_split]
     bob_x, bob_y = X_reduced[val_split + train_split:], y[val_split + train_split:]
     print("保存数据为 numpy 文件...")
-    np.savez("data_val.npz", x=val_x, y=val_y)
-    np.savez("data_alice.npz", x=alice_x, y=alice_y)
-    np.savez("data_bob.npz", x=bob_x, y=bob_y)
+    np.savez("datasets/data_val.npz", x=val_x, y=val_y)
+    np.savez("datasets/data_alice.npz", x=alice_x, y=alice_y)
+    np.savez("datasets/data_bob.npz", x=bob_x, y=bob_y)
     print("数据准备完成！")
-    joblib.dump(scaler, "scaler.pkl")
-    joblib.dump(pca, "pca.pkl")
+    joblib.dump(scaler, "datasets/scaler.pkl")
+    joblib.dump(pca, "datasets/pca.pkl")
     all_features_columns = list(data_train.drop(['outcome', 'level'], axis=1).columns)
-    np.save("all_features_columns.npy", all_features_columns)
+    np.save("datasets/all_features_columns.npy", all_features_columns)
 
 # -------- 加载数据 --------
 def load_data(client_name):
     if client_name == "alice":
-        data = np.load("data_alice.npz")
+        data = np.load("datasets/data_alice.npz")
     elif client_name == "bob":
-        data = np.load("data_bob.npz")
+        data = np.load("datasets/data_bob.npz")
     else:
         raise ValueError("客户端名称必须为 'alice' 或 'bob'")
     x = torch.tensor(data["x"], dtype=torch.float32)
@@ -128,7 +128,7 @@ def load_data(client_name):
     return DataLoader(dataset, batch_size=32, shuffle=True)
 
 def load_val_data():
-    data = np.load("data_val.npz")
+    data = np.load("datasets/data_val.npz")
     x = torch.tensor(data["x"], dtype=torch.float32)
     y = torch.tensor(data["y"], dtype=torch.float32).view(-1, 1)
     dataset = TensorDataset(x, y)
@@ -163,7 +163,7 @@ class FlowerClient(fl.client.Client):
             coeff_mod_bit_sizes=[60, 40, 40, 60]
         )
         self.context.generate_galois_keys()
-        self.context.global_scale = 2 ** 60
+        self.context.global_scale = 2 ** 40
         self.param_shapes = None
 
     def get_parameters(self, ins):
@@ -215,6 +215,9 @@ class FlowerClient(fl.client.Client):
                 var_val = ts.ckks_vector_from(self.context, base64.b64decode(var_b64.encode("utf-8"))).decrypt()[0]
                 grad_val = ts.ckks_vector_from(self.context, base64.b64decode(grad_b64.encode("utf-8"))).decrypt()[0]
                 print(f"Layer {i} aggregated mean: {mean_val}, var: {var_val}, grad: {grad_val}")
+        # 保存全局模型权重，每次覆盖
+        torch.save(self.model.state_dict(), "models/global_model.pth")
+        print("全局模型权重已保存到 models/global_model.pth")
 
     def fit(self, ins):
         self.set_parameters(ins.parameters)
@@ -230,7 +233,7 @@ class FlowerClient(fl.client.Client):
                 self.optimizer.step()
         epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
         print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
-        save_path = f"client_model_{self.client_name}.pth"
+        save_path = f"models/client_model_{self.client_name}.pth"
         torch.save(self.model.state_dict(), save_path)
         print(f"模型权重已保存到 {save_path}")
         return fl.common.FitRes(

@@ -70,7 +70,7 @@ def load_test_data():
         'dst_host_serror_rate', 'dst_host_srv_serror_rate', 'dst_host_rerror_rate',
         'dst_host_srv_rerror_rate', 'outcome', 'level'
     ]
-    data_test = pd.read_csv("KDDTest+.txt", header=None, names=columns)
+    data_test = pd.read_csv("datasets/KDDTest+.txt", header=None, names=columns)
     # outcome 列先转为二分类
     data_test.loc[data_test['outcome'] == "normal", "outcome"] = 0
     data_test.loc[data_test['outcome'] != 0, "outcome"] = 1
@@ -81,14 +81,14 @@ def load_test_data():
     cat_cols = ['is_host_login', 'protocol_type', 'service', 'flag', 'land', 'logged_in', 'is_guest_login', 'level', 'outcome']
     df_num = data_test.drop(cat_cols, axis=1)
     num_cols = df_num.columns
-    scaler = joblib.load("scaler.pkl")
-    pca = joblib.load("pca.pkl")
+    scaler = joblib.load("datasets/scaler.pkl")
+    pca = joblib.load("datasets/pca.pkl")
     scaled_df = scaler.transform(df_num)
     scaled_df = pd.DataFrame(scaled_df, columns=num_cols)
     data_test.drop(labels=num_cols, axis=1, inplace=True)
     data_test[num_cols] = scaled_df[num_cols]
     data_test = pd.get_dummies(data_test, columns=['protocol_type', 'service', 'flag'])
-    all_features_columns = np.load("all_features_columns.npy", allow_pickle=True)
+    all_features_columns = np.load("datasets/all_features_columns.npy", allow_pickle=True)
     for col in all_features_columns:
         if col not in data_test.columns:
             data_test[col] = 0
@@ -112,7 +112,10 @@ def evaluate(model_path, device):
             new_state_dict[k] = v
     model.load_state_dict(new_state_dict)
     model.eval()
-    test_loader = load_test_data()
+    # load_test_data()为KDDTest+.txt测试集，load_val_data()为KDDTrain+.txt数据集前20%
+    # test_loader = load_test_data()
+    from pt_client import load_val_data
+    test_loader = load_val_data()
     correct = 0
     total = 0
     with torch.no_grad():
@@ -123,7 +126,7 @@ def evaluate(model_path, device):
             predicted = (preds > 0.5).float()
             correct += (predicted == y).sum().item()
             total += y.size(0)
-    print(f"KDDTest+ 测试集准确率: {correct / total:.4f}")
+    print(f"测试集准确率: {correct / total:.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

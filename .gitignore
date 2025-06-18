@@ -1,5 +1,6 @@
 # Ignore Python byte-code files
 __pycache__/
 server_logs/
-*.npz
 .DS_Store
+*.npz
+*.npy

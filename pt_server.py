@@ -31,7 +31,7 @@ class EncryptedFedAvg(fl.server.strategy.FedAvg):
             pub_context_b64 = pub_context_b64.decode("utf-8")
         pub_context_bytes = base64.b64decode(pub_context_b64)
         context = ts.context_from(pub_context_bytes)
-        context.global_scale = 2 ** 60
+        context.global_scale = 2 ** 40
 
         num_clients = len(results)
         params_list = []
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     )
     fl.server.start_server(
         server_address="0.0.0.0:8080",
-        config=fl.server.ServerConfig(num_rounds=50),
+        config=fl.server.ServerConfig(num_rounds=15),
         strategy=strategy,
     )
     logging.info("联邦学习服务器已关闭")
