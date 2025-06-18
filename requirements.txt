@@ -4,3 +4,5 @@ opacus==1.5.4
 pandas==2.3.0
 scikit-learn==1.6.1
 torch==2.7.0
+tenseal==0.3.16
+joblib==1.5.1
