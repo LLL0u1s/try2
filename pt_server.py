@@ -92,6 +92,9 @@ class EncryptedFedAvg(fl.server.strategy.FedAvg):
             accuracies = [r[1].metrics["accuracy"] for r in results]
             accuracy_aggregated = sum(accuracies) / len(accuracies)
             loss_aggregated = sum(r[1].loss for r in results) / len(results)
+            # 写入全局结果文件
+            with open("res/res_total.txt", "a") as f:
+                f.write(f"{accuracy_aggregated},{loss_aggregated}\n")
             logging.info(f"第 {server_round} 轮平均准确率: {accuracy_aggregated:.4f}")
             return loss_aggregated, {"accuracy": accuracy_aggregated}
         except Exception as e:
