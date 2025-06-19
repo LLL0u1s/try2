@@ -100,7 +100,7 @@ def load_test_data():
     dataset = TensorDataset(x_tensor, y_tensor)
     return DataLoader(dataset, batch_size=32, shuffle=False)
 
-def evaluate(model_path, device):
+def evaluate_with_loader(model_path, device, test_loader):
     model = PTModel(input_dim=20).to(device)
     state_dict = torch.load(model_path, map_location=device)
     # 去除 _module. 前缀
@@ -112,10 +112,6 @@ def evaluate(model_path, device):
             new_state_dict[k] = v
     model.load_state_dict(new_state_dict)
     model.eval()
-    # load_test_data()为KDDTest+.txt测试集，load_val_data()为KDDTrain+.txt数据集前20%
-    # test_loader = load_test_data()
-    from pt_client import load_val_data
-    test_loader = load_val_data()
     correct = 0
     total = 0
     with torch.no_grad():
@@ -130,7 +126,28 @@ def evaluate(model_path, device):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True, help="模型权重文件路径，如 client_model_alice.pth")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="models/global_model.pth",
+        help="模型权重文件路径，如 models/global_model.pth"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="kddtest",
+        choices=["kddtest", "kddtrain"],
+        help="选择评估数据集：kddtest 或 kddtrain"
+    )
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    evaluate(args.model_path, device)
+
+    # 根据参数选择数据集
+    if args.dataset == "kddtest":
+        test_loader = load_test_data()
+    elif args.dataset == "kddtrain":
+        from pt_client import load_val_data
+        test_loader = load_val_data()
+    else:
+        raise ValueError("请选择正确的数据集：kddtest 或 kddtrain")
+    evaluate_with_loader(args.model_path, device, test_loader)
