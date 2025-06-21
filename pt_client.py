@@ -18,6 +18,7 @@ import sys
 import traceback
 import concurrent.futures
 import os
+import time
 
 # -------- 自定义自注意力层 --------
 class SelfAttention(nn.Module):
@@ -158,10 +159,10 @@ class FlowerClient(fl.client.Client):
             module=self.model,
             optimizer=self.optimizer,
             data_loader=self.train_loader,
-            target_epsilon=5.0,
-            target_delta=1e-5,
+            target_epsilon=5.0,      # 目标隐私预算ε
+            target_delta=1e-5,       # 目标δ
             epochs=1,
-            max_grad_norm=1.0
+            max_grad_norm=1.0        # 梯度裁剪阈值
         )
         print(f"差分隐私已启用，目标 ε = 5.0，δ = 1e-5")
         self.scale = 1e6  # 量化因子
@@ -289,6 +290,7 @@ class FlowerClient(fl.client.Client):
         try:
             self.set_parameters(ins.parameters)
             self.model.train()
+            start_time = time.time()  # 记录开始时间
             for epoch in range(1):
                 for x, y in self.train_loader:
                     x, y = x.to(self.device), y.to(self.device)
@@ -298,6 +300,11 @@ class FlowerClient(fl.client.Client):
                     loss = self.criterion(preds, y)
                     loss.backward()
                     self.optimizer.step()
+            end_time = time.time()  # 记录结束时间
+            train_time = end_time - start_time
+            # 写入训练时间到文件
+            with open(f"res/res_time_{self.client_name}.txt", "a") as f:
+                f.write(f"{train_time}\n")
             epsilon = self.privacy_engine.get_epsilon(delta=1e-5)
             print(f"当前隐私预算: ε = {epsilon:.2f}, δ = 1e-5")
             save_path = f"models/client_model_{self.client_name}.pth"
