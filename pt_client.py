@@ -331,10 +331,15 @@ class FlowerClient(fl.client.Client):
                     predicted = (preds > 0.5).float()
                     correct += (predicted == y).sum().item()
                     total += y.size(0)
+            acc = correct / total
+            avg_loss = loss_total / total
+            # 写入本地结果文件
+            with open(f"res/res_{self.client_name}.txt", "a") as f:
+                f.write(f"{acc},{avg_loss}\n")
             return fl.common.EvaluateRes(
-                loss=loss_total / total,
+                loss=avg_loss,
                 num_examples=total,
-                metrics={"accuracy": correct / total},
+                metrics={"accuracy": acc},
                 status=fl.common.Status(code=fl.common.Code.OK, message="Success")
             )
         except Exception as e:
